@@ -58,6 +58,10 @@ async function main() {
 
   // Process messages
   for (const msg of newMessages) {
+    // Debug: log raw message type and content snippet
+    const rawContent = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || {});
+    log(`DEBUG msg_type=${msg.msg_type} content=${rawContent.slice(0, 120)}`);
+
     let text = extractText(msg);
     if (!text) continue;
 
