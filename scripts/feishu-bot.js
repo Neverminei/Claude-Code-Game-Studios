@@ -279,6 +279,8 @@ async function fetchDocxContent(token, documentId) {
       token, "GET",
       `/open-apis/docx/v1/documents/${documentId}/raw_content`
     );
+    log(`docx raw data keys: ${Object.keys(data).join(",")} data keys: ${Object.keys(data.data || {}).join(",")}`);
+    log(`docx full data: ${JSON.stringify(data).slice(0, 500)}`);
     const blocks = data.data?.blocks || [];
     log(`docx got ${blocks.length} blocks, block types: ${blocks.slice(0,5).map(b => Object.keys(b).filter(k => k !== 'elements').join(',')).join(' | ')}`);
     const result = blocks
