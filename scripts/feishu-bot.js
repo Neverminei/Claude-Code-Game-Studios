@@ -279,11 +279,16 @@ async function fetchDocxContent(token, documentId) {
       token, "GET",
       `/open-apis/docx/v1/documents/${documentId}/raw_content`
     );
-    log(`docx raw data keys: ${Object.keys(data).join(",")} data keys: ${Object.keys(data.data || {}).join(",")}`);
-    log(`docx full data: ${JSON.stringify(data).slice(0, 500)}`);
+    // raw_content returns data.content as plain text
+    const content = data.data?.content || "";
+    if (content) {
+      log(`docx content: ${content.length} chars`);
+      return content;
+    }
+    // Fallback: try structured blocks
     const blocks = data.data?.blocks || [];
-    log(`docx got ${blocks.length} blocks, block types: ${blocks.slice(0,5).map(b => Object.keys(b).filter(k => k !== 'elements').join(',')).join(' | ')}`);
-    const result = blocks
+    log(`docx blocks fallback: ${blocks.length} blocks`);
+    return blocks
       .map((block) => {
         const getText = (el) => el.text_run?.content || "";
         if (block.text) return block.text.elements?.map(getText).join("");
@@ -296,8 +301,6 @@ async function fetchDocxContent(token, documentId) {
       })
       .filter(Boolean)
       .join("\n");
-    log(`docx result: ${result.length} chars`);
-    return result;
   } catch (e) {
     log(`docx error: ${e.message}`);
     return null;
