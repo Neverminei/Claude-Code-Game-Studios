@@ -261,9 +261,13 @@ async function fetchFeishuDoc(token, url) {
     if (node?.obj_type === "docx" && node?.obj_token) {
       return await fetchDocxContent(token, node.obj_token);
     }
+    log(`wiki node: obj_type=${node?.obj_type} obj_token=${node?.obj_token}`);
     return `[${node?.obj_type || "unknown"}]`;
-  } catch {}
+  } catch (e) {
+    log(`wiki node error: ${e.message}`);
+  }
 
+  log(`falling back to docx direct with token=${docToken}`);
   return await fetchDocxContent(token, docToken);
 }
 
@@ -287,7 +291,8 @@ async function fetchDocxContent(token, documentId) {
       })
       .filter(Boolean)
       .join("\n");
-  } catch {
+  } catch (e) {
+    log(`docx error: ${e.message}`);
     return null;
   }
 }
