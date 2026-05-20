@@ -58,7 +58,11 @@ async function main() {
 
   // Process messages
   for (const msg of newMessages) {
-    const text = extractText(msg);
+    let text = extractText(msg);
+    if (!text) continue;
+
+    // Strip @mention prefix (group chat bot @mention format)
+    text = text.replace(/^@\S+\s+/, "").trim();
     if (!text) continue;
 
     log(`msg: chat=${msg.chat_id} text="${text.slice(0, 80)}"`);
