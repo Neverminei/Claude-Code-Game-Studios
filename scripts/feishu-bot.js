@@ -14,7 +14,7 @@ const path = require("path");
 // ── Config ────────────────────────────────────────────────
 const CONFIG = {
   feishu: {
-    appId: process.env.FEISHU_APP_ID || "cli_aa87dcf9fef91cd3",
+    appId: process.env.FEISHU_APP_ID || "cli_aa873d6374a31cba",
     appSecret: process.env.FEISHU_APP_SECRET || "",
     spreadsheetToken: "SVPssYjPshEOzot6VuJcmqzqnMg",
     templateSheetId: "hb1ouh",
@@ -226,10 +226,11 @@ async function listRecentMessages(token, chatId, sinceTimeMs) {
   const path = `/open-apis/im/v1/messages?container_id_type=chat&container_id=${chatId}&page_size=20&sort_type=ByCreateTimeDesc`;
   const data = await feishuApi(token, "GET", path);
   const items = data.data?.items || [];
-  const since = (Number(sinceTimeMs) || 0) / 1000;
+  // create_time from Feishu API is already in milliseconds
+  const since = Number(sinceTimeMs) || 0;
   return items
     .filter((m) => (Number(m.create_time) || 0) > since)
-    .map((m) => ({ ...m, create_time_ms: (Number(m.create_time) || 0) * 1000 }));
+    .map((m) => ({ ...m, create_time_ms: Number(m.create_time) || 0 }));
 }
 
 async function replyText(token, messageId, text) {
