@@ -58,9 +58,6 @@ async function main() {
 
   // Process messages
   for (const msg of newMessages) {
-    // Debug: log full message object to see the actual API response structure
-    log(`DEBUG full_msg=${JSON.stringify(msg).slice(0, 300)}`);
-
     let text = extractText(msg);
     if (!text) continue;
 
@@ -95,7 +92,9 @@ async function main() {
 // ── Message Helpers ──────────────────────────────────────
 function extractText(msg) {
   try {
-    const content = typeof msg.content === "string" ? JSON.parse(msg.content) : msg.content;
+    // Feishu API wraps content inside body.content (not top-level content)
+    const raw = msg.body?.content || msg.content;
+    const content = typeof raw === "string" ? JSON.parse(raw) : (raw || {});
     return (content.text || "").trim();
   } catch {
     return "";
