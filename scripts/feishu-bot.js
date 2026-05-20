@@ -257,7 +257,9 @@ async function fetchFeishuDoc(token, url) {
       token, "GET",
       `/open-apis/wiki/v2/spaces/get_node?token=${docToken}`
     );
+    log(`wiki nodeData keys: ${Object.keys(nodeData).join(",")} data keys: ${nodeData.data ? Object.keys(nodeData.data).join(",") : "no data"}`);
     const node = nodeData.data?.node;
+    log(`wiki node: ${node ? `obj_type=${node.obj_type} obj_token=${node.obj_token?.slice(0,19)}` : "null"}`);
     if (node?.obj_type === "docx" && node?.obj_token) {
       return await fetchDocxContent(token, node.obj_token);
     }
@@ -278,7 +280,8 @@ async function fetchDocxContent(token, documentId) {
       `/open-apis/docx/v1/documents/${documentId}/raw_content`
     );
     const blocks = data.data?.blocks || [];
-    return blocks
+    log(`docx got ${blocks.length} blocks, block types: ${blocks.slice(0,5).map(b => Object.keys(b).filter(k => k !== 'elements').join(',')).join(' | ')}`);
+    const result = blocks
       .map((block) => {
         const getText = (el) => el.text_run?.content || "";
         if (block.text) return block.text.elements?.map(getText).join("");
@@ -291,6 +294,8 @@ async function fetchDocxContent(token, documentId) {
       })
       .filter(Boolean)
       .join("\n");
+    log(`docx result: ${result.length} chars`);
+    return result;
   } catch (e) {
     log(`docx error: ${e.message}`);
     return null;
