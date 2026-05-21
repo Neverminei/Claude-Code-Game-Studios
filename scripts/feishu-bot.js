@@ -163,7 +163,7 @@ async function handleConfirm(token, msg) {
 
   const item = pending[0];
   if (Date.now() - item.created_at > PENDING_EXPIRE_MS) {
-    await deletePending(token, item.row_index);
+    await deletePending(token, msg.chat_id);
     await replyText(token, msg.message_id, "⏰ 预览已过期，请重新发送 `/p` 命令。");
     return;
   }
@@ -171,7 +171,7 @@ async function handleConfirm(token, msg) {
   const sheetId = await ensureSheet(token, item.project_code);
   const maxId = await getMaxId(token, sheetId);
   await appendRows(token, sheetId, item.requirements, maxId, item.doc_url);
-  await deletePending(token, item.row_index);
+  await deletePending(token, msg.chat_id);
 
   const count = item.requirements.length;
   await replyText(
@@ -189,7 +189,7 @@ async function handleCancel(token, msg) {
     await replyText(token, msg.message_id, "⚠️ 没有待确认的需求。");
     return;
   }
-  await deletePending(token, pending[0].row_index);
+  await deletePending(token, msg.chat_id);
   await replyText(token, msg.message_id, "已取消。");
 }
 
@@ -198,7 +198,7 @@ async function cleanupExpired(token, now) {
   const all = await getAllPending(token);
   for (const item of all) {
     if (now - item.created_at > PENDING_EXPIRE_MS) {
-      await deletePending(token, item.row_index);
+      await deletePending(token, item.chat_id);
       try {
         await replyText(
           token,
@@ -328,14 +328,20 @@ async function extractArtRequirements(docContent) {
   const prompt = `你是游戏项目美术需求提取工具。阅读以下策划文档，提取所有美术资源需求。
 
 美术类型只能是以下之一或组合：UI, Icon, 模型, 原画, 动画, 特效
-优先级：P1(核心/紧急), P2(重要), P3(锦上添花)
+优先级：P1(文档明确标注为核心/紧急才用), P2(文档明确标注为重要才用), P3(默认)
 
 返回纯 JSON 数组（不要 markdown 代码块）：
 [
-  {"名称": "需求名称", "类型": "UI,Icon", "优先级": "P2", "备注": "补充说明"}
+  {"名称": "需求名称", "类型": "UI,Icon", "优先级": "P3", "备注": "补充说明"}
 ]
 
-规则：每个独立美术资源拆一条。名称具体。有动画/特效时类型里要包含。
+规则：
+1. 按界面/屏幕为粒度合并。不要把界面内的每个按钮/进度条拆成独立条目——它们属于同一个界面需求。
+   例如"结算界面"包含背景、盈亏明细卡、连胜进度条、底部按钮，只出一条。
+2. 独立于界面的全局元素（角色立绘、图标、特效等）才单独列出。
+3. 优先级严格按文档表述——文档没提紧急/重要就一律填 P3。宁低勿高。
+4. 名称用界面名或资产名，不要罗列内部组件。
+5. 有动画/特效时类型里要包含。
 
 文档：
 ---
@@ -483,124 +489,65 @@ async function appendRows(token, sheetId, requirements, startId, docUrl) {
   }
 }
 
-// ── Pending State ("待确认" sheet in spreadsheet) ───────
-async function ensurePendingSheet(token) {
-  const data = await feishuApi(
-    token, "GET",
-    `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/metainfo?extended_fields=true`
-  );
-  const sheets = data.data?.sheets || [];
-  const existing = sheets.find((s) => s.title === CONFIG.feishu.pendingSheetTitle);
-  if (existing) return existing.sheet_id;
+// ── Pending State (local JSON file) ───────────────────────
+const PENDING_FILE = path.join(__dirname, ".feishu-bot-pending.json");
 
-  const resp = await feishuApi(
-    token, "POST",
-    `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/sheets_batch_update`,
-    {
-      requests: [{
-        addSheet: { properties: { title: CONFIG.feishu.pendingSheetTitle, index: 0 } },
-      }],
-    }
-  );
-  const sheetId = resp.data?.replies?.[0]?.addSheet?.properties?.sheetId;
-  if (sheetId) {
-    await feishuApi(
-      token, "POST",
-      `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/values_append`,
-      {
-        valueRange: {
-          range: `${sheetId}!A1`,
-          values: [["chat_id", "message_id", "project_code", "doc_url", "requirements_json", "created_at"]],
-        },
-      }
-    );
+function loadPending() {
+  try {
+    return JSON.parse(fs.readFileSync(PENDING_FILE, "utf8"));
+  } catch {
+    return {};
   }
-  return sheetId;
+}
+
+function savePendingFile(data) {
+  fs.writeFileSync(PENDING_FILE, JSON.stringify(data));
 }
 
 async function savePending(token, item) {
-  const sheetId = await ensurePendingSheet(token);
-  await feishuApi(
-    token, "POST",
-    `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/values_append`,
-    {
-      valueRange: {
-        range: `${sheetId}!A2`,
-        values: [[
-          item.chat_id,
-          item.message_id,
-          item.project_code,
-          item.doc_url,
-          JSON.stringify(item.requirements),
-          item.created_at,
-        ]],
-      },
+  const all = loadPending();
+  all[item.chat_id] = item;
+  // Clean up expired entries
+  for (const [chatId, pending] of Object.entries(all)) {
+    if (Date.now() - pending.created_at > PENDING_EXPIRE_MS) {
+      delete all[chatId];
     }
-  );
+  }
+  savePendingFile(all);
 }
 
 async function getPending(token, chatId) {
-  try {
-    const sheetId = await ensurePendingSheet(token);
-    const data = await feishuApi(
-      token, "GET",
-      `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/values/${sheetId}!A2:F`
-    );
-    const rows = data.data?.valueRange?.values || [];
-    const idx = rows.findIndex((row) => row[0] === chatId);
-    if (idx === -1) return [];
-    const row = rows[idx];
-    return [{
-      row_index: idx + 2,
-      chat_id: row[0],
-      message_id: row[1],
-      project_code: row[2],
-      doc_url: row[3],
-      requirements: JSON.parse(row[4] || "[]"),
-      created_at: Number(row[5]) || 0,
-    }];
-  } catch {
+  const all = loadPending();
+  const item = all[chatId];
+  if (!item) return [];
+  if (Date.now() - item.created_at > PENDING_EXPIRE_MS) {
+    delete all[chatId];
+    savePendingFile(all);
     return [];
   }
+  return [item];
 }
 
 async function getAllPending(token) {
-  try {
-    const sheetId = await ensurePendingSheet(token);
-    const data = await feishuApi(
-      token, "GET",
-      `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/values/${sheetId}!A2:F`
-    );
-    const rows = data.data?.valueRange?.values || [];
-    return rows.map((row, i) => ({
-      row_index: i + 2,
-      chat_id: row[0],
-      message_id: row[1],
-      project_code: row[2],
-      doc_url: row[3],
-      requirements: JSON.parse(row[4] || "[]"),
-      created_at: Number(row[5]) || 0,
-    }));
-  } catch {
-    return [];
+  const all = loadPending();
+  const results = [];
+  let changed = false;
+  for (const [chatId, item] of Object.entries(all)) {
+    if (Date.now() - item.created_at > PENDING_EXPIRE_MS) {
+      delete all[chatId];
+      changed = true;
+    } else {
+      results.push(item);
+    }
   }
+  if (changed) savePendingFile(all);
+  return results;
 }
 
-async function deletePending(token, rowIndex) {
-  try {
-    const sheetId = await ensurePendingSheet(token);
-    // Clear the row by writing empty values
-    await feishuApi(
-      token, "POST",
-      `/open-apis/sheets/v2/spreadsheets/${CONFIG.feishu.spreadsheetToken}/values_append`,
-      {
-        valueRange: {
-          range: `${sheetId}!A${rowIndex}:F${rowIndex}`,
-          values: [["__DELETED__", "", "", "", "", ""]],
-        },
-      }
-    );
-  } catch {}
+async function deletePending(token, chatId) {
+  const all = loadPending();
+  delete all[chatId];
+  savePendingFile(all);
 }
 
 // ── State File ────────────────────────────────────────────
