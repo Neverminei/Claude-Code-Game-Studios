@@ -279,9 +279,16 @@ async function fetchDocxContent(token, documentId) {
       token, "GET",
       `/open-apis/docx/v1/documents/${documentId}/raw_content`
     );
+    // raw_content returns data.content as plain text
+    const content = data.data?.content || "";
+    if (content) {
+      log(`docx content: ${content.length} chars`);
+      return content;
+    }
+    // Fallback: try structured blocks
     const blocks = data.data?.blocks || [];
-    log(`docx got ${blocks.length} blocks, block types: ${blocks.slice(0,5).map(b => Object.keys(b).filter(k => k !== 'elements').join(',')).join(' | ')}`);
-    const result = blocks
+    log(`docx blocks fallback: ${blocks.length} blocks`);
+    return blocks
       .map((block) => {
         const getText = (el) => el.text_run?.content || "";
         if (block.text) return block.text.elements?.map(getText).join("");
@@ -294,8 +301,6 @@ async function fetchDocxContent(token, documentId) {
       })
       .filter(Boolean)
       .join("\n");
-    log(`docx result: ${result.length} chars`);
-    return result;
   } catch (e) {
     log(`docx error: ${e.message}`);
     return null;
@@ -321,26 +326,57 @@ async function extractArtRequirements(docContent) {
 ${docContent}
 ---`;
 
-  const resp = await fetch(`${CONFIG.ai.baseUrl}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": CONFIG.ai.apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: CONFIG.ai.model,
-      max_tokens: 4096,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
+  const url = `${CONFIG.ai.baseUrl}/v1/messages`;
+  const t0 = Date.now();
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": CONFIG.ai.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: CONFIG.ai.model,
+        max_tokens: 4096,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+  } catch (e) {
+    log(`ai fetch error: ${e.message}`);
+    return [];
+  }
 
-  const data = await resp.json();
+  const elapsed = Date.now() - t0;
+  log(`ai http: ${resp.status} ${resp.statusText} (${elapsed}ms)`);
+
+  const rawBody = await resp.text();
+  log(`ai resp body: ${rawBody.slice(0, 500)}`);
+
+  if (!resp.ok) {
+    log(`ai non-ok response, returning []`);
+    return [];
+  }
+
+  let data;
+  try {
+    data = JSON.parse(rawBody);
+  } catch {
+    log(`ai resp not valid json`);
+    return [];
+  }
+
   const aiText = data.content?.[0]?.text || "";
+  log(`ai text length: ${aiText.length}, preview: ${aiText.slice(0, 200)}`);
+
   let jsonStr = aiText.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
   try {
-    return JSON.parse(jsonStr);
-  } catch {
+    const result = JSON.parse(jsonStr);
+    log(`ai parsed: ${result.length} items`);
+    return result;
+  } catch (e) {
+    log(`ai json parse failed: ${e.message}. jsonStr preview: ${jsonStr.slice(0, 300)}`);
     return [];
   }
 }
