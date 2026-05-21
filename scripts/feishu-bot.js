@@ -367,12 +367,36 @@ ${docContent}
     return [];
   }
 
-  const aiText = data.content?.[0]?.text || "";
+  // DeepSeek returns content array with thinking + text blocks; find the text one
+  let aiText = "";
+  if (typeof data.content === "string") {
+    aiText = data.content;
+  } else if (Array.isArray(data.content)) {
+    aiText = data.content.find(c => c.type === "text")?.text || "";
+    // Fallback: some responses might only have a single content block without type
+    if (!aiText && data.content.length === 1 && data.content[0].text) {
+      aiText = data.content[0].text;
+    }
+  }
   log(`ai text length: ${aiText.length}, preview: ${aiText.slice(0, 200)}`);
 
-  let jsonStr = aiText.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+  // Try multiple extraction strategies
+  let jsonStr = aiText.trim();
+
+  // Strategy 1: extract from ```json ... ``` code block
+  const fenced = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fenced) jsonStr = fenced[1].trim();
+
+  // Strategy 2: find first [ ... ] array
+  const arrayMatch = jsonStr.match(/\[\s*\{[\s\S]*\}\s*\]/);
+  if (arrayMatch) jsonStr = arrayMatch[0];
+
   try {
     const result = JSON.parse(jsonStr);
+    if (!Array.isArray(result)) {
+      log(`ai returned non-array: ${typeof result}`);
+      return [];
+    }
     log(`ai parsed: ${result.length} items`);
     return result;
   } catch (e) {
