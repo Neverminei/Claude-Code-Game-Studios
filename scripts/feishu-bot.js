@@ -58,6 +58,15 @@ async function main() {
 
   // Process messages
   for (const msg of newMessages) {
+    // Skip bot's own messages to avoid infinite loop
+    if (msg.msg_type === "text" && msg.body?.content) {
+      try {
+        const content = typeof msg.body.content === "string"
+          ? JSON.parse(msg.body.content) : msg.body.content;
+        if (content.text && /^[⚠️❌📋✅⏰]/.test(content.text)) continue;
+      } catch {}
+    }
+
     let text = extractText(msg);
     if (!text) continue;
 
@@ -117,15 +126,7 @@ async function handlePreview(token, msg, projectCode, docUrl) {
     return;
   }
 
-  await savePending(token, {
-    chat_id: msg.chat_id,
-    message_id: msg.message_id,
-    project_code: projectCode,
-    doc_url: docUrl,
-    requirements: requirements,
-    created_at: Date.now(),
-  });
-
+  // Send preview FIRST, then try to save pending state (non-blocking)
   const lines = requirements.map(
     (r, i) => `  ${i + 1}. **${r.名称}** — ${r.类型} [${r.优先级}]`
   );
@@ -134,7 +135,22 @@ async function handlePreview(token, msg, projectCode, docUrl) {
     msg.message_id,
     `📋 **${projectCode}** 识别到 **${requirements.length}** 条美术需求：\n${lines.join("\n")}\n\n---\n回复 \`/p yes\` 确认填入需求表\n回复 \`/p no\` 取消\n⏰ 5 分钟后自动取消`
   );
-  log(`preview done: ${requirements.length} items`);
+  log(`preview sent: ${requirements.length} items`);
+
+  // Save pending state for /p yes|no (best-effort, don't block reply)
+  try {
+    await savePending(token, {
+      chat_id: msg.chat_id,
+      message_id: msg.message_id,
+      project_code: projectCode,
+      doc_url: docUrl,
+      requirements: requirements,
+      created_at: Date.now(),
+    });
+  } catch (e) {
+    log(`savePending failed (non-fatal): ${e.message}`);
+    await replyText(token, msg.message_id, "⚠️ 预览已生成，但暂存状态失败，`/p yes` 确认功能暂不可用。");
+  }
 }
 
 // ── /p yes → Confirm ─────────────────────────────────────
