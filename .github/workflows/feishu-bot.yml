@@ -2,8 +2,8 @@ name: feishu-bot
 
 on:
   schedule:
-    # 每 2 分钟运行一次
-    - cron: "*/2 * * * *"
+    # 每 5 分钟运行一次
+    - cron: "*/5 * * * *"
   # 也允许手动触发
   workflow_dispatch:
 
