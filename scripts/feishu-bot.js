@@ -1,11 +1,9 @@
 // ============================================================
-// feishu-bot.js — GitHub Actions 定时轮询
+// feishu-bot.js — 本地持久进程，高频轮询
 //
-// 每 2 分钟运行:
-//   1. 查机器人新消息
-//   2. /p SA042 <url> → 预览
-//   3. /p yes → 确认填表
-//   4. 5 分钟无确认 → 自动取消
+// 启动: node feishu-bot.js
+// 每 5 秒查新消息，AI 提取后即时回复
+// /p SA042 <url> → 预览 → /p yes 确认 → 填表
 // ============================================================
 
 const fs = require("fs");
@@ -25,6 +23,10 @@ const CONFIG = {
     baseUrl: "https://api.deepseek.com/anthropic",
     model: "deepseek-v4-pro",
   },
+  poll: {
+    intervalMs: 5000,        // 轮询间隔 5 秒
+    tokenRefreshMs: 100 * 60 * 1000, // token 每 100 分钟刷新
+  },
 };
 
 const FEISHU_HOST = "https://open.feishu.cn";
@@ -33,69 +35,100 @@ const PENDING_EXPIRE_MS = 5 * 60 * 1000;
 
 // ── Main ──────────────────────────────────────────────────
 async function main() {
-  log("bot start");
+  // Validate credentials on startup
+  if (!CONFIG.feishu.appSecret) {
+    console.error("ERROR: FEISHU_APP_SECRET env var is required");
+    console.error("  set FEISHU_APP_SECRET=<your-secret>");
+    process.exit(1);
+  }
+  if (!CONFIG.ai.apiKey) {
+    console.error("ERROR: DEEPSEEK_API_KEY env var is required");
+    console.error("  set DEEPSEEK_API_KEY=<your-key>");
+    process.exit(1);
+  }
 
+  log("===== feishu-bot started (persistent mode) =====");
+  log(`poll interval: ${CONFIG.poll.intervalMs / 1000}s`);
+
+  let token = await getTenantToken();
+  let lastTokenRefresh = Date.now();
   const state = loadState();
-  const now = Date.now();
 
-  const token = await getTenantToken();
-  const chats = await listBotChats(token);
-  log(`found ${chats.length} chats`);
-
-  // Get new messages from all chats
-  const newMessages = [];
-  for (const chat of chats) {
-    const msgs = await listRecentMessages(token, chat.chat_id, state.lastProcessedTime);
-    newMessages.push(...msgs);
-  }
-  log(`new messages: ${newMessages.length}`);
-
-  if (newMessages.length > 0) {
-    const maxTime = Math.max(...newMessages.map((m) => m.create_time_ms));
-    state.lastProcessedTime = maxTime;
-    saveState(state);
-  }
-
-  // Process messages
-  for (const msg of newMessages) {
-    // Skip bot's own messages to avoid infinite loop
-    if (msg.msg_type === "text" && msg.body?.content) {
-      try {
-        const content = typeof msg.body.content === "string"
-          ? JSON.parse(msg.body.content) : msg.body.content;
-        if (content.text && /^[⚠️❌📋✅⏰]/.test(content.text)) continue;
-      } catch {}
-    }
-
-    let text = extractText(msg);
-    if (!text) continue;
-
-    // Strip @mention prefix (group chat bot @mention format)
-    text = text.replace(/^@\S+\s+/, "").trim();
-    if (!text) continue;
-
-    log(`msg: chat=${msg.chat_id} text="${text.slice(0, 80)}"`);
-
+  // Main polling loop
+  while (true) {
     try {
-      if (/^\/p\s+yes\b/i.test(text)) {
-        await handleConfirm(token, msg);
-      } else if (/^\/p\s+no\b/i.test(text)) {
-        await handleCancel(token, msg);
-      } else {
-        const match = text.match(/^\/p\s+(\S+)\s+(https?:\/\/\S+)/);
-        if (match) {
-          await handlePreview(token, msg, match[1].toUpperCase(), match[2]);
+      // Refresh token periodically
+      if (Date.now() - lastTokenRefresh > CONFIG.poll.tokenRefreshMs) {
+        token = await getTenantToken();
+        lastTokenRefresh = Date.now();
+        log("token refreshed");
+      }
+
+      const now = Date.now();
+
+      // Get new messages from all chats
+      const chats = await listBotChats(token);
+      const newMessages = [];
+      for (const chat of chats) {
+        const msgs = await listRecentMessages(token, chat.chat_id, state.lastProcessedTime);
+        newMessages.push(...msgs);
+      }
+
+      if (newMessages.length > 0) {
+        log(`new messages: ${newMessages.length}`);
+        const maxTime = Math.max(...newMessages.map((m) => m.create_time_ms));
+        state.lastProcessedTime = maxTime;
+        saveState(state);
+      }
+
+      // Process messages sequentially
+      for (const msg of newMessages) {
+        // Skip bot's own messages to avoid infinite loop
+        if (msg.msg_type === "text" && msg.body?.content) {
+          try {
+            const content = typeof msg.body.content === "string"
+              ? JSON.parse(msg.body.content) : msg.body.content;
+            if (content.text && /^[⚠️❌📋✅⏰]/.test(content.text)) continue;
+          } catch {}
+        }
+
+        let text = extractText(msg);
+        if (!text) continue;
+
+        // Strip @mention prefix
+        text = text.replace(/^@\S+\s+/, "").trim();
+        if (!text) continue;
+
+        log(`msg: chat=${msg.chat_id} text="${text.slice(0, 80)}"`);
+
+        try {
+          if (/^\/p\s+yes\b/i.test(text)) {
+            await handleConfirm(token, msg);
+          } else if (/^\/p\s+no\b/i.test(text)) {
+            await handleCancel(token, msg);
+          } else {
+            const match = text.match(/^\/p\s+(\S+)\s+(https?:\/\/\S+)/);
+            if (match) {
+              await handlePreview(token, msg, match[1].toUpperCase(), match[2]);
+            }
+          }
+        } catch (e) {
+          log(`error: ${e.message}`);
         }
       }
+
+      // Clean up expired pending items
+      await cleanupExpired(token, now);
     } catch (e) {
-      log(`error: ${e.message}`);
+      log(`cycle error: ${e.message}`);
     }
+
+    await sleep(CONFIG.poll.intervalMs);
   }
+}
 
-  // Clean up expired pending items
-  await cleanupExpired(token, now);
-
-  log("bot done");
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ── Message Helpers ──────────────────────────────────────
