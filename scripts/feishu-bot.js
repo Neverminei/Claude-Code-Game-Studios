@@ -168,18 +168,35 @@ async function handleConfirm(token, msg) {
     return;
   }
 
-  const sheetId = await ensureSheet(token, item.project_code);
-  const maxId = await getMaxId(token, sheetId);
-  await appendRows(token, sheetId, item.requirements, maxId, item.doc_url);
-  await deletePending(token, msg.chat_id);
+  // Try to write to spreadsheet; if permissions fail, still confirm cancellation
+  let writeOk = false;
+  try {
+    const sheetId = await ensureSheet(token, item.project_code);
+    const maxId = await getMaxId(token, sheetId);
+    await appendRows(token, sheetId, item.requirements, maxId, item.doc_url);
+    writeOk = true;
+  } catch (e) {
+    log(`sheet write failed: ${e.message}`);
+  }
 
   const count = item.requirements.length;
-  await replyText(
-    token,
-    msg.message_id,
-    `✅ **${item.project_code}** 已更新，新增 **${count}** 条美术需求。`
-  );
-  log(`confirmed: ${item.project_code}, ${count} items`);
+  await deletePending(token, msg.chat_id);
+
+  if (writeOk) {
+    await replyText(
+      token,
+      msg.message_id,
+      `✅ **${item.project_code}** 已更新需求表，新增 **${count}** 条。`
+    );
+  } else {
+    // Best-effort: confirm even if sheet write failed
+    await replyText(
+      token,
+      msg.message_id,
+      `✅ 已确认 **${item.project_code}** 的 **${count}** 条需求（暂存已清理）。\n⚠️ 写入需求表失败，请检查表格权限后手动导入。`
+    );
+  }
+  log(`confirmed: ${item.project_code}, ${count} items, writeOk=${writeOk}`);
 }
 
 // ── /p no → Cancel ───────────────────────────────────────
@@ -189,8 +206,13 @@ async function handleCancel(token, msg) {
     await replyText(token, msg.message_id, "⚠️ 没有待确认的需求。");
     return;
   }
+  const item = pending[0];
   await deletePending(token, msg.chat_id);
-  await replyText(token, msg.message_id, "已取消。");
+  await replyText(
+    token,
+    msg.message_id,
+    `已取消 **${item.project_code}** 的 **${item.requirements.length}** 条需求预览。`
+  );
 }
 
 // ── Cleanup Expired ──────────────────────────────────────
@@ -203,7 +225,7 @@ async function cleanupExpired(token, now) {
         await replyText(
           token,
           item.message_id,
-          "⏰ 预览已过期，已自动取消。"
+          `⏰ **${item.project_code}** 预览已过期（超 5 分钟），已自动取消。请重新发送 \`/p\` 命令。`
         );
       } catch {}
       log(`expired: ${item.project_code}`);
@@ -327,21 +349,23 @@ async function fetchDocxContent(token, documentId) {
 async function extractArtRequirements(docContent) {
   const prompt = `你是游戏项目美术需求提取工具。阅读以下策划文档，提取所有美术资源需求。
 
-美术类型只能是以下之一或组合：UI, Icon, 模型, 原画, 动画, 特效
-优先级：P1(文档明确标注为核心/紧急才用), P2(文档明确标注为重要才用), P3(默认)
+美术类型（可组合）：UI, Icon, 模型, 原画, 动画, 特效
+优先级：文档明确标核心/紧急 → P1，明确标重要 → P2，其余一律 P3
 
 返回纯 JSON 数组（不要 markdown 代码块）：
 [
   {"名称": "需求名称", "类型": "UI,Icon", "优先级": "P3", "备注": "补充说明"}
 ]
 
-规则：
-1. 按界面/屏幕为粒度合并。不要把界面内的每个按钮/进度条拆成独立条目——它们属于同一个界面需求。
-   例如"结算界面"包含背景、盈亏明细卡、连胜进度条、底部按钮，只出一条。
-2. 独立于界面的全局元素（角色立绘、图标、特效等）才单独列出。
-3. 优先级严格按文档表述——文档没提紧急/重要就一律填 P3。宁低勿高。
-4. 名称用界面名或资产名，不要罗列内部组件。
-5. 有动画/特效时类型里要包含。
+提取规则：
+1. 一切源于文档，不编造文档中没有的内容。
+2. 拆得越细越好——每个独立的美术资产单独一条。
+3. 同名或强关联的组件/状态变体合并为一条，用"及其组件"或"及其状态"连接。
+   例：文档有"连胜进度条"和"连胜进度条各里程碑节点发光"→ 合并为"连胜进度条及其组件"。
+   例：文档有"落槌背景"和"金槌子落槌背景"→ 合并为"落槌背景及其状态"。
+4. 独立功能、独立界面的元素不合并。
+5. 名称用"界面名/资产名"，备注里简要说明文档中提到的关键细节。
+6. 有动画/特效时类型里必须包含 动画/特效。
 
 文档：
 ---
