@@ -1,9 +1,9 @@
 // ============================================================
-// feishu-bot.js — 事件驱动本地服务
+// feishu-bot.js — 本地持久进程，3 秒轮询 + 可选事件订阅
 //
 // 启动: node feishu-bot.js
-// 通过 Feishu Event Subscription 实时接收消息，即时回复
-// 需配置公网 URL（ngrok 等）作为飞书事件回调地址
+// 默认每 3 秒查新消息，体感秒回
+// 可选: 设 PUBLIC_URL 开启 Feishu Event Subscription（需 ngrok）
 // /p SA042 <url> → 预览 → /p yes 确认 → 填表
 // ============================================================
 
@@ -75,15 +75,15 @@ async function main() {
   const server = http.createServer(handleRequest);
   server.listen(CONFIG.port);
 
-  // Background: cleanup expired pending items every 30s
+  // Background: cleanup expired pending items every 15s
   setInterval(async () => {
     try {
       const token = await getToken();
       await cleanupExpired(token, Date.now());
     } catch {}
-  }, 30000);
+  }, 15000);
 
-  // Background: silent polling as safety net (every 30s)
+  // Background: polling loop (3s — feels instant)
   setInterval(async () => {
     try {
       const token = await getToken();
@@ -100,7 +100,7 @@ async function main() {
         }
       }
     } catch {}
-  }, 30000);
+  }, 3000);
 }
 
 // ── HTTP Request Handler ───────────────────────────────────
