@@ -1,10 +1,10 @@
-name: feishu-bot
+name: feishu-bot (已停用 — 机器人改为本地持久进程)
 
 on:
-  schedule:
-    # 每 5 分钟运行一次
-    - cron: "*/5 * * * *"
-  # 也允许手动触发
+  # schedule 已停用 — 机器人改为本地事件驱动模式
+  # 如需恢复定时触发，取消下面注释
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:

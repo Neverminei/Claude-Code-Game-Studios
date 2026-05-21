@@ -1,134 +1,213 @@
 // ============================================================
-// feishu-bot.js — 本地持久进程，高频轮询
+// feishu-bot.js — 事件驱动本地服务
 //
 // 启动: node feishu-bot.js
-// 每 5 秒查新消息，AI 提取后即时回复
+// 通过 Feishu Event Subscription 实时接收消息，即时回复
+// 需配置公网 URL（ngrok 等）作为飞书事件回调地址
 // /p SA042 <url> → 预览 → /p yes 确认 → 填表
 // ============================================================
 
 const fs = require("fs");
 const path = require("path");
+const http = require("http");
 
 // ── Config ────────────────────────────────────────────────
 const CONFIG = {
+  port: parseInt(process.env.PORT) || 3456,
+  publicUrl: process.env.PUBLIC_URL || "",
   feishu: {
     appId: process.env.FEISHU_APP_ID || "cli_aa873d6374a31cba",
     appSecret: process.env.FEISHU_APP_SECRET || "",
+    verificationToken: process.env.FEISHU_VERIFICATION_TOKEN || "",
     spreadsheetToken: "SVPssYjPshEOzot6VuJcmqzqnMg",
     templateSheetId: "hb1ouh",
-    pendingSheetTitle: "待确认",
   },
   ai: {
     apiKey: process.env.DEEPSEEK_API_KEY || "",
     baseUrl: "https://api.deepseek.com/anthropic",
     model: "deepseek-v4-pro",
   },
-  poll: {
-    intervalMs: 5000,        // 轮询间隔 5 秒
-    tokenRefreshMs: 100 * 60 * 1000, // token 每 100 分钟刷新
-  },
 };
 
 const FEISHU_HOST = "https://open.feishu.cn";
 const STATE_FILE = path.join(__dirname, ".feishu-bot-state.json");
 const PENDING_EXPIRE_MS = 5 * 60 * 1000;
+const TOKEN_REFRESH_MS = 100 * 60 * 1000;
+
+// ── Global token cache ─────────────────────────────────────
+let cachedToken = null;
+let lastTokenRefresh = 0;
+
+async function getToken() {
+  if (cachedToken && Date.now() - lastTokenRefresh < TOKEN_REFRESH_MS) {
+    return cachedToken;
+  }
+  cachedToken = await fetchTenantToken();
+  lastTokenRefresh = Date.now();
+  return cachedToken;
+}
 
 // ── Main ──────────────────────────────────────────────────
 async function main() {
-  // Validate credentials on startup
   if (!CONFIG.feishu.appSecret) {
     console.error("ERROR: FEISHU_APP_SECRET env var is required");
-    console.error("  set FEISHU_APP_SECRET=<your-secret>");
     process.exit(1);
   }
   if (!CONFIG.ai.apiKey) {
     console.error("ERROR: DEEPSEEK_API_KEY env var is required");
-    console.error("  set DEEPSEEK_API_KEY=<your-key>");
     process.exit(1);
   }
 
-  log("===== feishu-bot started (persistent mode) =====");
-  log(`poll interval: ${CONFIG.poll.intervalMs / 1000}s`);
+  // Pre-fetch token
+  await getToken();
+  log("===== feishu-bot started (event-driven) =====");
+  log(`http server: port ${CONFIG.port}`);
+  if (CONFIG.publicUrl) {
+    log(`public url: ${CONFIG.publicUrl}`);
+    log(`event callback: ${CONFIG.publicUrl}/feishu/events`);
+  } else {
+    log("WARNING: PUBLIC_URL not set — event subscription won't work");
+    log("  Start ngrok: ngrok http " + CONFIG.port);
+    log("  Then set PUBLIC_URL=<ngrok-url> and restart");
+  }
 
-  let token = await getTenantToken();
-  let lastTokenRefresh = Date.now();
-  const state = loadState();
+  // Start HTTP server for Feishu events
+  const server = http.createServer(handleRequest);
+  server.listen(CONFIG.port);
 
-  // Main polling loop
-  while (true) {
+  // Background: cleanup expired pending items every 30s
+  setInterval(async () => {
     try {
-      // Refresh token periodically
-      if (Date.now() - lastTokenRefresh > CONFIG.poll.tokenRefreshMs) {
-        token = await getTenantToken();
-        lastTokenRefresh = Date.now();
-        log("token refreshed");
-      }
+      const token = await getToken();
+      await cleanupExpired(token, Date.now());
+    } catch {}
+  }, 30000);
 
-      const now = Date.now();
-
-      // Get new messages from all chats
+  // Background: silent polling as safety net (every 30s)
+  setInterval(async () => {
+    try {
+      const token = await getToken();
+      const state = loadState();
       const chats = await listBotChats(token);
-      const newMessages = [];
       for (const chat of chats) {
         const msgs = await listRecentMessages(token, chat.chat_id, state.lastProcessedTime);
-        newMessages.push(...msgs);
-      }
-
-      if (newMessages.length > 0) {
-        log(`new messages: ${newMessages.length}`);
-        const maxTime = Math.max(...newMessages.map((m) => m.create_time_ms));
-        state.lastProcessedTime = maxTime;
-        saveState(state);
-      }
-
-      // Process messages sequentially
-      for (const msg of newMessages) {
-        // Skip bot's own messages to avoid infinite loop
-        if (msg.msg_type === "text" && msg.body?.content) {
-          try {
-            const content = typeof msg.body.content === "string"
-              ? JSON.parse(msg.body.content) : msg.body.content;
-            if (content.text && /^[⚠️❌📋✅⏰]/.test(content.text)) continue;
-          } catch {}
+        for (const msg of msgs) {
+          await processMessage(token, msg);
         }
-
-        let text = extractText(msg);
-        if (!text) continue;
-
-        // Strip @mention prefix
-        text = text.replace(/^@\S+\s+/, "").trim();
-        if (!text) continue;
-
-        log(`msg: chat=${msg.chat_id} text="${text.slice(0, 80)}"`);
-
-        try {
-          if (/^\/p\s+yes\b/i.test(text)) {
-            await handleConfirm(token, msg);
-          } else if (/^\/p\s+no\b/i.test(text)) {
-            await handleCancel(token, msg);
-          } else {
-            const match = text.match(/^\/p\s+(\S+)\s+(https?:\/\/\S+)/);
-            if (match) {
-              await handlePreview(token, msg, match[1].toUpperCase(), match[2]);
-            }
-          }
-        } catch (e) {
-          log(`error: ${e.message}`);
+        if (msgs.length > 0) {
+          state.lastProcessedTime = Math.max(...msgs.map((m) => m.create_time_ms));
+          saveState(state);
         }
       }
-
-      // Clean up expired pending items
-      await cleanupExpired(token, now);
-    } catch (e) {
-      log(`cycle error: ${e.message}`);
-    }
-
-    await sleep(CONFIG.poll.intervalMs);
-  }
+    } catch {}
+  }, 30000);
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+// ── HTTP Request Handler ───────────────────────────────────
+async function handleRequest(req, res) {
+  // CORS for ngrok debug UI
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
+  if (req.method === "GET" && req.url === "/") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("feishu-bot running\n");
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/feishu/events") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        log(`event: ${data.header?.event_type || "unknown"}`);
+
+        // URL verification challenge
+        if (data.type === "url_verification") {
+          const resp = { challenge: data.challenge };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(resp));
+          log("url verification: ok");
+          return;
+        }
+
+        // Message received
+        if (data.header?.event_type === "im.message.receive_v1") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ code: 0 }));
+
+          // Process asynchronously (don't block event response)
+          const msg = data.event?.message;
+          if (msg && msg.msg_type === "text") {
+            const token = await getToken();
+            // Construct message object compatible with existing processMessage
+            const msgObj = {
+              chat_id: msg.chat_id,
+              message_id: msg.message_id,
+              create_time_ms: parseInt(msg.create_time) || Date.now(),
+              body: { content: msg.content },
+            };
+            await processMessage(token, msgObj);
+            // Update state
+            const state = loadState();
+            state.lastProcessedTime = Math.max(
+              state.lastProcessedTime,
+              msgObj.create_time_ms
+            );
+            saveState(state);
+          }
+          return;
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ code: 0 }));
+      } catch (e) {
+        log(`event error: ${e.message}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ code: 0 }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end("not found\n");
+}
+
+// ── Message Processing ─────────────────────────────────────
+async function processMessage(token, msg) {
+  // Skip bot's own messages
+  if (msg.msg_type === "text" && msg.body?.content) {
+    try {
+      const content = typeof msg.body.content === "string"
+        ? JSON.parse(msg.body.content) : msg.body.content;
+      if (content.text && /^[⚠️❌📋✅⏰]/.test(content.text)) return;
+    } catch {}
+  }
+
+  let text = extractText(msg);
+  if (!text) return;
+
+  // Strip @mention prefix
+  text = text.replace(/^@\S+\s+/, "").trim();
+  if (!text) return;
+
+  log(`msg: chat=${msg.chat_id} text="${text.slice(0, 80)}"`);
+
+  try {
+    if (/^\/p\s+yes\b/i.test(text)) {
+      await handleConfirm(token, msg);
+    } else if (/^\/p\s+no\b/i.test(text)) {
+      await handleCancel(token, msg);
+    } else {
+      const match = text.match(/^\/p\s+(\S+)\s+(https?:\/\/\S+)/);
+      if (match) {
+        await handlePreview(token, msg, match[1].toUpperCase(), match[2]);
+      }
+    }
+  } catch (e) {
+    log(`error: ${e.message}`);
+  }
 }
 
 // ── Message Helpers ──────────────────────────────────────
@@ -267,7 +346,7 @@ async function cleanupExpired(token, now) {
 }
 
 // ── Feishu API ────────────────────────────────────────────
-async function getTenantToken() {
+async function fetchTenantToken() {
   const resp = await fetch(`${FEISHU_HOST}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
