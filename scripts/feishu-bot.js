@@ -367,7 +367,8 @@ ${docContent}
     return [];
   }
 
-  const aiText = data.content?.[0]?.text || "";
+  // DeepSeek returns content array with thinking + text blocks; find the text one
+  const aiText = data.content?.find(c => c.type === "text")?.text || "";
   log(`ai text length: ${aiText.length}, preview: ${aiText.slice(0, 200)}`);
 
   let jsonStr = aiText.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
